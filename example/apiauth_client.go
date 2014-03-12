@@ -32,7 +32,7 @@ func main() {
 	tr.AppKey = "123"
 	tr.Username = "CHRIS"
 	tr.UserKey = "34"
-	tr.Nonce = "34"
+	tr.Nonce = 34
 	tr.Sign()
 	jtr, err := json.Marshal(tr)
 	if err != nil {
@@ -67,7 +67,8 @@ func main() {
 	}
 	//        sig := tok.ComputeSignature(req, "app_secret")
 	appSecret := "app_secret"
-	req.Header.Add("Authorization", tok.AuthHeaderString(appSecret))
+	tr.Nonce += 1
+	req.Header.Add("Authorization", tok.AuthHeaderString(appSecret, fmt.Sprintf("%d", tr.Nonce)))
 	resp, err = client.Do(req)
 	if err != nil {
 		fmt.Println(err)

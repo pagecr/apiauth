@@ -13,6 +13,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 )
 
@@ -20,12 +21,18 @@ type TokenRequest struct {
 	AppKey    string
 	Username  string
 	UserKey   string
-	Nonce     string
+	Nonce     int64
 	Signature string
 }
 
+type TokenInfo struct {
+	Request  *TokenRequest
+	Response *TokenResponse
+	Nonce    int64
+}
+
 func (tr TokenRequest) ComputeSignature() string {
-	msg := tr.AppKey + tr.Username + tr.UserKey + tr.Nonce
+	msg := fmt.Sprintf("%s%s%s%d", tr.AppKey, tr.Username, tr.UserKey, tr.Nonce)
 	sig := ComputeHmacSHA1(msg, getAppSecret(tr.AppKey))
 	log.Println("Computing Signature for:", msg)
 	log.Println("Signature:", sig)
@@ -61,13 +68,13 @@ func authorizedAppUser(appKey string, username string, userKey string) bool {
 	return true
 }
 
-var savedTokenData *TokenRequest
+var savedTokenData *TokenInfo
 
-func saveTokenData(token string, tr *TokenRequest) {
+func saveTokenData(token string, tr *TokenInfo) {
 	savedTokenData = tr
 }
 
-func getTokenData(token string) *TokenRequest {
+func getTokenData(token string) *TokenInfo {
 	return savedTokenData
 }
 
@@ -85,19 +92,27 @@ func CreateNewToken(tr *TokenRequest) (token string, err error) {
 		return
 	}
 	token = genRandomToken()
-	saveTokenData(token, tr)
 	return
 }
 
-func (tr TokenResponse) ComputeSignature(secret string) string {
-	msg := tr.AuthType + " " + tr.Token
+func (tr TokenResponse) ComputeSignature(secret string, nonce string) string {
+	msg := fmt.Sprintf("%s %s;%s", tr.AuthType, tr.Token, nonce)
 	computedSig := ComputeHmacSHA1(msg, secret)
 	return computedSig
 }
-func (tr TokenResponse) AuthHeaderString(secret string) string {
-	ahs := tr.AuthType + " " + tr.Token + ":" + tr.ComputeSignature(secret)
+
+/*
+func (tr *TokenInfo) BumpNonce() {
+	tr.Nonce += 1
+}
+*/
+func (tr TokenResponse) AuthHeaderString(secret string, nonce string) string {
+	ahs := fmt.Sprintf("%s %s;%s:%s", tr.AuthType, tr.Token, nonce, tr.ComputeSignature(secret, nonce))
 	return ahs
 }
+
+var DefaultAuthType string = "MCAA"
+
 func Authenticate() martini.Handler {
 	var warned bool
 
@@ -133,7 +148,8 @@ func Authenticate() martini.Handler {
 		res.Header().Set("Content-Type", "application/json")
 		//tokenResponse := &TokenResponse{"MCSS", token, siteSig}
 
-		tokenResponse := &TokenResponse{"MCAA", token}
+		tokenResponse := TokenResponse{DefaultAuthType, token}
+		saveTokenData(token, &TokenInfo{Nonce: tokenRequest.Nonce, Request: &tokenRequest, Response: &tokenResponse})
 		jr, _ := json.Marshal(tokenResponse)
 		fmt.Fprintf(res, "%s", jr)
 		return
@@ -142,24 +158,42 @@ func Authenticate() martini.Handler {
 	}
 }
 
+func Required() martini.Handler {
+	return AuthRequired
+}
 func AuthRequired(res http.ResponseWriter, req *http.Request) {
 	authHdr := req.Header.Get("Authorization")
-	parts := strings.Split(authHdr, ":")
-	p2 := strings.Split(parts[0], " ")
-	token := p2[1]
-	log.Println("token=", token)
-	/*
-		if parts[0] != "MCAA "+token {
-			http.Error(res, "Not Authorized - Invalid Token", http.StatusUnauthorized)
-			return
-		}
-	*/
+	fmt.Println("Ahdr:", authHdr)
 
-	msg := parts[0]
+	patt := regexp.MustCompile(`(\S+) (\S+);(\d+):(\S+)`)
+	m := patt.FindSubmatch([]byte(authHdr))
+	if len(m) == 0 {
+		http.Error(res, "Not Authorized - Invalid Authorization Header", http.StatusUnauthorized)
+		return
+	}
+
+	authType := string(m[1])
+	token := string(m[2])
+	nonce := string(m[3])
+	sig := string(m[4])
+	fmt.Println(authType, token, nonce, sig)
+
+	log.Println("token=", token)
 	tr := getTokenData(token)
-	computedSig := ComputeHmacSHA1(msg, getAppSecret(tr.AppKey))
-	if !auth.SecureCompare(parts[1], computedSig) {
-		http.Error(res, "Not Authorized - Invalid Sig", http.StatusUnauthorized)
+	if tr == nil || authType != tr.Response.AuthType {
+		http.Error(res, "Not Authorized - Invalid Token or AuthType", http.StatusUnauthorized)
+		return
+	}
+	if nonce <= fmt.Sprintf("%d", tr.Nonce) {
+		http.Error(res, "Not Authorized - Invalid Nonce", http.StatusUnauthorized)
+		return
+	}
+
+	secret := getAppSecret(tr.Request.AppKey)
+	cHdr := tr.Response.AuthHeaderString(secret, nonce)
+	//computedSig := ComputeHmacSHA1(msg, secret)
+	if !auth.SecureCompare(authHdr, cHdr) {
+		http.Error(res, "Not Authorized - Invalid Header/Sig", http.StatusUnauthorized)
 		return
 	}
 }
