@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"github.com/codegangsta/martini"
 	"github.com/martini-contrib/auth"
-	_ "github.com/martini-contrib/render"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -84,10 +83,12 @@ func CreateNewToken(tr *TokenRequest) (token string, err error) {
 	log.Println("supplied signature:", sig)
 	log.Println("computed signature:", csig)
 	if !auth.SecureCompare(csig, sig) {
+		log.Printf("client supplied:%+v\n", tr)
 		err = errors.New("Invalid Token Request Signature")
 		return
 	}
-	if !authorizedAppUser(tr.AppKey, tr.Username, tr.UserKey) {
+	if !appAuthHandler(tr.AppKey, tr.Username, tr.UserKey) {
+		log.Printf("client supplied:%+v\n", tr)
 		err = errors.New("User has not authorized this App")
 		return
 	}
@@ -101,11 +102,6 @@ func (tr TokenResponse) ComputeSignature(secret string, nonce string) string {
 	return computedSig
 }
 
-/*
-func (tr *TokenInfo) BumpNonce() {
-	tr.Nonce += 1
-}
-*/
 func (tr TokenResponse) AuthHeaderString(secret string, nonce string) string {
 	ahs := fmt.Sprintf("%s %s;%s:%s", tr.AuthType, tr.Token, nonce, tr.ComputeSignature(secret, nonce))
 	return ahs
@@ -113,6 +109,13 @@ func (tr TokenResponse) AuthHeaderString(secret string, nonce string) string {
 
 var DefaultAuthType string = "MCAA"
 
+type AppAuthHandler func(appKey string, username string, userKey string) bool
+
+var appAuthHandler AppAuthHandler = authorizedAppUser
+
+func SetAppAuthHandler(newHandler AppAuthHandler) {
+	appAuthHandler = newHandler
+}
 func Authenticate() martini.Handler {
 	var warned bool
 
@@ -158,9 +161,13 @@ func Authenticate() martini.Handler {
 	}
 }
 
+func NotRequired() martini.Handler {
+	return NotAuthRequired
+}
 func Required() martini.Handler {
 	return AuthRequired
 }
+func NotAuthRequired(res http.ResponseWriter, req *http.Request) {}
 func AuthRequired(res http.ResponseWriter, req *http.Request) {
 	authHdr := req.Header.Get("Authorization")
 	fmt.Println("Ahdr:", authHdr)

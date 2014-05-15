@@ -5,7 +5,12 @@ import (
 	"github.com/pagecr/apiauth"
 )
 
+func authUser(appid string, username string, userkey string) bool {
+	return true
+}
+
 func main() {
+	apiauth.SetAppAuthHandler(authUser)
 	m := martini.Classic()
 	m.Get("/", func() string { return "Welcome to the public area\n" })
 	m.Post("/authenticate", apiauth.Authenticate())
