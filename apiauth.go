@@ -51,12 +51,12 @@ func getUserSecret(userKey string) string {
 /*
 * Routine that validates access to the App
  */
-func authorizedAppUser(appKey string, userKey string) bool {
+func isAuthorizedAppUser(appKey string, userKey string) bool {
 	return true
 }
 
 /*
-*  Need facility to associate token string with toke info
+*  Need facility to associate token string with token info
 *  This simple way only works for a single server
 *  so needs to be replaced
  */
@@ -69,11 +69,17 @@ func getTokenData(token string) *TokenInfo {
 	return savedTokenData
 }
 
+// associate this token with this user/app combo
+func saveToken(AppKey string, UserKey string, token string) string {
+	return token
+}
+
 /*
 * Token management
  */
 type TokenRequest struct {
-	AppKey string // well-known key embedded in the application
+	AppKey  string // well-known key embedded in the application
+	AppHash string
 
 	UserKey  string // Username and userKey are supplied by client via user entry
 	UserHash string
@@ -89,20 +95,19 @@ type TokenInfo struct {
 }
 
 func (tr TokenRequest) ComputeSignature() string {
-	msg := fmt.Sprintf("%s%s%s%d", tr.AppKey, tr.UserKey, tr.UserHash, tr.Nonce)
+	msg := fmt.Sprintf("%s%s%s%s%d", tr.AppKey, tr.AppHash, tr.UserKey, tr.UserHash, tr.Nonce)
 	sig := ComputeHmacSHA1(msg, getAppSecret(tr.AppKey))
 	log.Println("Computing Signature for:", msg)
 	log.Println("Signature:", sig)
 	return sig
 }
-func (tr TokenRequest) ComputeUserHash() string {
-	msg := fmt.Sprintf("%s", tr.UserKey)
-	secret := fmt.Sprintf("%s%d", getUserSecret(tr.UserKey), tr.Nonce)
-	uh := ComputeHmacSHA1(msg, secret)
+func (tr TokenRequest) ComputeHash(key, secret string) string {
+	msg := fmt.Sprintf("%s%d", key, tr.Nonce)
+	h := ComputeHmacSHA1(msg, secret)
 	log.Println("Computing hash for:", msg)
 	log.Println("with secret:", secret)
-	log.Println("Signature:", uh)
-	return uh
+	log.Println("Signature:", h)
+	return h
 }
 func (tr *TokenRequest) Sign() {
 	tr.Signature = tr.ComputeSignature()
@@ -124,7 +129,7 @@ var DefaultAuthType string = "MCAA"
  */
 type AppAuthHandler func(appKey string, userKey string) bool
 
-var appAuthHandler AppAuthHandler = authorizedAppUser
+var appAuthHandler AppAuthHandler = isAuthorizedAppUser
 
 func SetAppAuthHandler(newHandler AppAuthHandler) {
 	appAuthHandler = newHandler
@@ -141,12 +146,20 @@ func CreateNewToken(tr *TokenRequest) (token string, err error) {
 		err = errors.New("Invalid Token Request Signature")
 		return
 	}
-	chash := tr.ComputeUserHash()
+	chash := tr.ComputeHash(tr.UserKey, getUserSecret(tr.UserKey))
 	hash := tr.UserHash
 	if !auth.SecureCompare(chash, hash) {
 		// provided userhash doesn't match what was computed
 		log.Printf("client supplied:%+v\n", tr)
 		err = errors.New("Invalid Token Request User Hash")
+		return
+	}
+	chash = tr.ComputeHash(tr.AppKey, getAppSecret(tr.AppKey))
+	hash = tr.AppHash
+	if !auth.SecureCompare(chash, hash) {
+		// provided userhash doesn't match what was computed
+		log.Printf("client supplied:%+v\n", tr)
+		err = errors.New("Invalid Token Request App Hash")
 		return
 	}
 	if !appAuthHandler(tr.AppKey, tr.UserKey) {
@@ -155,7 +168,7 @@ func CreateNewToken(tr *TokenRequest) (token string, err error) {
 		err = errors.New("User has not authorized this App")
 		return
 	}
-	token = genRandomToken()
+	token = saveToken(tr.AppKey, tr.UserKey, genRandomToken())
 	return
 }
 
@@ -260,7 +273,7 @@ func AuthDenied(res http.ResponseWriter, req *http.Request) {
 }
 func AuthRequired(res http.ResponseWriter, req *http.Request) {
 	fmt.Println("AUTH REQUIRED")
-	authHdr := req.Header.Get("Authorization")
+	authHdr := req.Header.Get("X-Authorization")
 	fmt.Println("Ahdr:", authHdr)
 
 	patt := regexp.MustCompile(`(\S+) (\S+);(\d+):(\S+)`)
@@ -277,26 +290,26 @@ func AuthRequired(res http.ResponseWriter, req *http.Request) {
 	fmt.Println("T:", authType, "t:", token, "n:", nonce, "s:", sig)
 
 	fmt.Println("token=", token)
-	lastToken := getTokenData(token)
-	if lastToken == nil || authType != lastToken.Response.AuthType {
+	lastTokenData := getTokenData(token)
+	if lastTokenData == nil || authType != lastTokenData.Response.AuthType {
 		http.Error(res, "Not Authorized - Invalid Token or AuthType", http.StatusUnauthorized)
 		return
 	}
-	if nonce <= lastToken.Nonce {
+	if nonce <= lastTokenData.Nonce {
 		http.Error(res, "Not Authorized - Invalid Nonce", http.StatusUnauthorized)
 		return
 	}
 
-	secret := getAppSecret(lastToken.Request.AppKey)
-	cHdr := lastToken.Response.AuthHeaderString(secret, fmt.Sprintf("%d", nonce))
+	secret := getAppSecret(lastTokenData.Request.AppKey)
+	cHdr := lastTokenData.Response.AuthHeaderString(secret, fmt.Sprintf("%d", nonce))
 	//computedSig := ComputeHmacSHA1(msg, secret)
 	if !auth.SecureCompare(authHdr, cHdr) {
 		http.Error(res, "Not Authorized - Invalid Header/Sig", http.StatusUnauthorized)
 		return
 	}
 
-	lastToken.Nonce = nonce
-	saveTokenData(token, lastToken)
+	lastTokenData.Nonce = nonce
+	saveTokenData(token, lastTokenData)
 }
 
 /*
